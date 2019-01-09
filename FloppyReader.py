@@ -90,7 +90,8 @@ class SCPWriter:
             self.__trackduration[num,k] = max(tr_rev.times) - min(tr_rev.times)
             self.__tracklen[num,k] = np.count_nonzero(np.diff(tr_rev.read_data) == -1) # count bitcells, aka transitions from high->low
 
-        self.__tracklen[num,self.__NREVS-1] = self.__tracklen[num,self.__NREVS-1]-1
+        # shorten first revolution by 1 bitcell to keep Aufit happy
+        self.__tracklen[num,0] = self.__tracklen[num,0]-1
         # now extract all data between first and last index pulses
         trkstart = indexpulse[0]
         trkstop = indexpulse[-1]
