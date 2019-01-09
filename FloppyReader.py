@@ -11,9 +11,13 @@ class SCPWriter:
     # number of tracks in a SCP files
     __NTRACKS = 168
 
+    # number of revolutions captured per track
+    __NREVS = 2
+
     def __init__(self, imagetype):
         self.__trackdata = dict()
-        self.__trackduration = self.__NTRACKS*[0.0]
+        self.__trackduration = np.zeros((self.__NTRACKS, self.__NREVS))
+        self.__tracklen = np.zeros((self.__NTRACKS, self.__NREVS))
         self.__imagetype = imagetype
 
     def fileheader(self):
@@ -21,7 +25,7 @@ class SCPWriter:
         scp_magic = b"SCP"
         scp_vers = 0x17 # version 1.7
         scp_type = self.__imagetype
-        scp_nrev = 1 # only one revolution
+        scp_nrev = self.__NREVS # number of revolutions
         scp_starttrack = 0 # always start at track 0  not at min(self.trackdata.keys())
         scp_endtrack = max(self.__trackdata.keys())
         scp_flags = 1 # flux data starts at index
@@ -51,10 +55,13 @@ class SCPWriter:
         # SCP track header
         scp_tmagic = b"TRK"
         scp_trackno = num
-        scp_tduration = round(self.__trackduration[num]/25e-9) 
-        scp_tlen = len(self.__trackdata[num]) # in bitcells, not in bytes!
-        scp_tstart = 16 # after this header
-        scp_trkhead = pack("<3sBLLL", scp_tmagic, scp_trackno, int(scp_tduration), scp_tlen, scp_tstart)
+        scp_trkhead = pack("<3sB", scp_tmagic, scp_trackno)
+        scp_tstart = 4 + 12*self.__NREVS # first revolution starts after this header
+        for k in range(self.__NREVS):
+            scp_tduration = round(self.__trackduration[num,k]/25e-9) 
+            scp_tlen = self.__tracklen[num,k] # in bitcells, not in bytes!
+            scp_trkhead = scp_trkhead + pack("<LLL", int(scp_tduration), int(scp_tlen), scp_tstart)
+            scp_tstart = scp_tstart + 2 * int(scp_tlen)  # start of next revolution
         return scp_trkhead
 
     def trackdata(self, num): # will raise KeyError if track does not exist
@@ -70,17 +77,28 @@ class SCPWriter:
         
         # faster binary file parser: assumes index in channel 1, read_data in channel 3
         temp = iter_unpack("=qQ", open(filename,"rb").read())
-        sample_rate = 40e6
+        sample_rate = 20e6
         tr = np.rec.array([(k[0]/sample_rate,(k[1]&2) >> 1,(k[1]&8) >> 3) for k in temp], dtype=[('times','f8'),('index','i4'),('read_data','i4')])
 
-        indexpulse = np.where(np.diff(tr.index) == -1) # index transitions from high->low
-        trkstart = indexpulse[0][0] + 1
-        trkstop = indexpulse[0][-1] + 1
-        tr = tr[trkstart:trkstop] # only time between index pulses
-        fluxchg = np.where(np.diff(tr.read_data) == -1) # transitions from high->low
-        fluxchg = np.add(*fluxchg,1) # +1 so we get the indices where read_data is low
+        indexpulse = np.where(np.diff(tr.index) == -1)[0]+1 # index transitions from high->low
+        if len(indexpulse) != self.__NREVS+1:
+            print("Not enough index pulses found")
+
+        for k in range(self.__NREVS):
+            # one revolution
+            tr_rev = tr[indexpulse[k]:indexpulse[k+1]+1] # one sample overlap
+            self.__trackduration[num,k] = max(tr_rev.times) - min(tr_rev.times)
+            self.__tracklen[num,k] = np.count_nonzero(np.diff(tr_rev.read_data) == -1) # count bitcells, aka transitions from high->low
+
+        self.__tracklen[num,self.__NREVS-1] = self.__tracklen[num,self.__NREVS-1]-1
+        # now extract all data between first and last index pulses
+        trkstart = indexpulse[0]
+        trkstop = indexpulse[-1]
+        tr = tr[trkstart:trkstop+1]
+        fluxchg = np.where(np.diff(tr.read_data) == -1)[0] # transitions from high->low
+        fluxchg = fluxchg+1 # +1 so we get the indices where read_data is low
         self.__trackdata[num] = np.diff(tr.times[fluxchg])
-        self.__trackduration[num] = tr.times.max() - tr.times.min()
+
 
     def saveimage(self, filename):
         with open(filename, "wb") as f:
